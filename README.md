@@ -70,4 +70,4 @@ folder — every file in it is required, not just the `.exe`.
 
 ## License
 
-MIT — do whatever you like with it.
+MIT — I guess.
