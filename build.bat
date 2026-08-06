@@ -1,46 +1,46 @@
-@echo off
-REM Builds a windowed (no console) app. Does NOT request admin
-REM elevation — testing showed the keyboard hook and Magnification
-REM API both work fine as a standard user.
-REM
-REM Uses --onedir (a folder, not a single self-extracting exe) and
-REM --noupx (no UPX compression). Both significantly reduce false-
-REM positive flags from Windows SmartScreen / antivirus: a single
-REM self-extracting, UPX-packed exe is structurally similar to how
-REM a lot of malware droppers are built, so scanners flag it on
-REM pattern alone even when the code is completely benign. A plain
-REM folder of files with an uncompressed exe looks much more like
-REM ordinary software.
+name: Build Windows exe
 
-pip install -r requirements.txt
-if errorlevel 1 (
-    echo.
-    echo pip install failed - see errors above.
-    pause
-    exit /b 1
-)
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
 
-REM Using "python -m PyInstaller" instead of the bare "pyinstaller" command
-REM avoids PATH issues where pip installs the package but the Scripts
-REM folder containing pyinstaller.exe isn't on PATH.
-python -m PyInstaller ^
-    --onedir ^
-    --noupx ^
-    --noconsole ^
-    --name FullscreenZoom ^
-    --icon assets\icon_idle.ico ^
-    --add-data "assets;assets" ^
-    zoom_app.py
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
 
-if errorlevel 1 (
-    echo.
-    echo Build FAILED - see errors above.
-    pause
-    exit /b 1
-)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-echo.
-echo Build complete: dist\FullscreenZoom\FullscreenZoom.exe
-echo Zip up the whole dist\FullscreenZoom folder to share/move it - all
-echo the files in it are needed, not just the .exe.
-pause
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: >
+          python -m PyInstaller
+          --onedir
+          --noupx
+          --noconsole
+          --name FullscreenZoom
+          --icon assets\icon_idle.ico
+          --add-data "assets;assets"
+          zoom_app.py
+
+      - name: Zip the build output
+        run: Compress-Archive -Path dist\FullscreenZoom\* -DestinationPath FullscreenZoom-windows.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FullscreenZoom-windows
+          path: FullscreenZoom-windows.zip
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: FullscreenZoom-windows.zip
