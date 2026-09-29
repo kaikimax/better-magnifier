@@ -1,4 +1,4 @@
-# Fullscreen Zoom
+# Better Magnifier
 
 A lightweight Windows fullscreen magnifier that lives in the system tray.
 Smoothly zooms and pans around your cursor without a console window.
@@ -70,4 +70,4 @@ folder — every file in it is required, not just the `.exe`.
 
 ## License
 
-MIT — I guess.
+MIT
