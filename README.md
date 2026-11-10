@@ -1,19 +1,59 @@
 # Better Magnifier
 
 A lightweight Windows fullscreen magnifier that lives in the system tray.
-Smoothly zooms and pans around your cursor without a console window.
+Smoothly zooms around your cursor without a console window, from the
+keyboard or the mouse wheel — similar to
+macOS's "use scroll gesture with modifier keys to zoom".
 
 ## Controls
 
-| Hotkey | Action |
+| Input | Action |
 |---|---|
 | `Ctrl+Alt+Z` | Toggle zoom on/off (same key both directions) |
 | `Ctrl+Alt+Q` | Quit the app completely |
-| `Alt + Up` (held) | Zoom in — only while zoom is ON, otherwise passes through to the focused app as normal |
-| `Alt + Down` (held) | Zoom out — same as above |
+| `Alt + Up` (held) | Zoom in. Turns zoom on automatically if it was off |
+| `Alt + Down` (held) | Zoom out. Turns zoom off once you're back at 1×. When zoom is off, passes through to the focused app as normal |
+| `Alt + scroll up` | Zoom in with the mouse wheel. Turns zoom on automatically if it was off |
+| `Alt + scroll down` | Zoom out with the mouse wheel. Turns zoom off once you're back at 1× |
 
-Right-click the tray icon for the same actions if you'd rather not use hotkeys.
-The tray icon turns **green** while zoom is active and **gray** while idle.
+Right-click the tray icon for "Toggle Zoom" / "Quit" if you'd rather not
+use hotkeys. The tray icon turns **green** while zoom is active and
+**gray** while idle.
+
+Zoom is anchored to the cursor: whatever is under the pointer stays put
+while you zoom, and moving the pointer pans across the whole screen.
+
+Only **plain** Alt is used. With Ctrl, Shift or Win also held, arrow
+keys and scrolling pass through untouched, so shortcuts like VS Code's
+`Shift+Alt+Up` (copy line) and `Ctrl+Alt+Up` (add cursor) keep working.
+Plain `Alt+Up` is always taken for zoom, so VS Code's "move line up"
+needs a different key binding. Scrolling without Alt works normally,
+and releasing Alt after zooming won't open the focused app's menu bar.
+
+## How Alt + scroll works
+
+- **Mouse wheel**: read with a low-level mouse hook. While Alt is held
+  the wheel event is used for zoom and never reaches the app underneath.
+- **Two-finger touchpad swipes**: on a Windows Precision Touchpad, swipes reach
+  the mouse hook only while zoom is already on (observed on a Surface; other
+  touchpads may differ). So Alt + swipe can zoom in and out once zoom is on,
+  but can't start it from 1× — use `Ctrl+Alt+Z` or `Alt + Up` for that.
+
+## Settings
+
+Adjustable constants near the top of `zoom_app.py`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `MIN_ZOOM` / `MAX_ZOOM` | `1.0` / `8.0` | Zoom range |
+| `DEFAULT_ZOOM` | `2.0` | Zoom level `Ctrl+Alt+Z` turns on at |
+| `ZOOM_SPEED` | `2.5` | Zoom units per second while holding `Alt+Up/Down` |
+| `ZOOM_SMOOTHING` | `8.0` | Higher = snappier zoom easing |
+| `SCROLL_ZOOM_PER_NOTCH` | `1.25` | Zoom multiplier per mouse-wheel notch |
+| `SCROLL_ZOOM_INVERT` | `False` | Flip the Alt+scroll direction |
+| `CENTER_ON_CURSOR` | `False` | `True` keeps the cursor centred on screen instead of anchoring zoom to it (the original behaviour) |
+| `PAN_SMOOTHING` | `18.0` | Pan easing, only used when `CENTER_ON_CURSOR = True` |
+
 
 ## Running from source
 
@@ -25,17 +65,19 @@ python zoom_app.py
 ## Building a standalone .exe
 
 ```bash
-build.bat
+pip install -r requirements.txt
+python -m PyInstaller --onedir --noupx --noconsole --name FullscreenZoom --icon assets\icon_idle.ico --add-data "assets;assets" zoom_app.py
 ```
 
 This produces `dist/FullscreenZoom/FullscreenZoom.exe` — a windowed
 (no console) app in a folder alongside its dependencies. It does
-**not** require administrator privileges — the keyboard hook and
-Magnification API both work fine as a standard user. The one
-limitation: if a window running *with* elevated privileges (an
-elevated installer, Task Manager, etc.) has focus, a non-elevated
-hook can't intercept keys typed into it — a rare edge case, not a
-general problem.
+**not** require administrator privileges — the keyboard and mouse
+hooks and the
+Magnification API all work as a standard user. The one limitation: if
+a window running *with* elevated privileges (an elevated installer,
+Task Manager, etc.) has focus or is under the cursor, a non-elevated
+app can't intercept keys or mouse-wheel input aimed at it — a rare
+edge case, not a general problem.
 
 The build deliberately avoids `--onefile` and UPX compression: a
 single self-extracting, compressed exe is structurally similar to
@@ -64,9 +106,7 @@ folder — every file in it is required, not just the `.exe`.
 ## Notes
 
 - Only one copy can run at a time — launching a second instance exits
-  immediately instead of double-hooking the keyboard.
-- Zoom range, zoom speed, and smoothing responsiveness are all
-  adjustable constants near the top of `zoom_app.py`.
+  immediately instead of double-hooking the keyboard and mouse.
 
 ## License
 
