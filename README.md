@@ -8,12 +8,26 @@ Smoothly zooms and pans around your cursor without a console window.
 | Hotkey | Action |
 |---|---|
 | `Ctrl+Alt+Z` | Toggle zoom on/off (same key both directions) |
+| `Ctrl+Alt+R` | Reset to 100% without leaving zoom mode |
 | `Ctrl+Alt+Q` | Quit the app completely |
 | `Alt + Up` (held) | Zoom in — only while zoom is ON, otherwise passes through to the focused app as normal |
 | `Alt + Down` (held) | Zoom out — same as above |
 
 Right-click the tray icon for the same actions if you'd rather not use hotkeys.
 The tray icon turns **green** while zoom is active and **gray** while idle.
+
+## Why it doesn't work on Task Manager (or other elevated windows)
+
+This is expected, not a bug. The app deliberately runs **without** admin
+rights (see below), and Windows enforces UIPI (User Interface Privilege
+Isolation), which blocks a non-elevated process's keyboard hook from
+intercepting input while a *higher-privilege* window — Task Manager,
+an elevated installer, etc. — has focus. If you need zoom to work over
+those windows too, you'd need to run `FullscreenZoom.exe` elevated
+yourself (right-click → Run as administrator), which brings back the
+Windows SmartScreen "unknown publisher" prompt on launch. It's a
+genuine trade-off between convenience and that one edge case, not
+something fixable in the code itself.
 
 ## Running from source
 
