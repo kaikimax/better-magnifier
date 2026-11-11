@@ -38,8 +38,16 @@ and releasing Alt after zooming won't open the focused app's menu bar.
   mouse hooks (on a Surface they only arrive while zoom is already on),
   so the touchpad's finger positions are read directly
   (Windows Raw Input) and two fingers moving up/down while Alt is held
-  become zoom. Raw Input can read the touchpad but not block it, so the
-  page under the cursor also scrolls a little while you zoom.
+  become zoom. Raw Input can't stop Windows from also scrolling the page,
+  so while Alt is held the app switches off Windows' two-finger touchpad
+  scrolling (`SPI_SETTOUCHPADPARAMETERS`), and switches it back on the
+  moment Alt is released or the app quits. The saved registry value is
+  not changed, but if the app is **killed** (Task Manager, a crash) while
+  Alt is held, scrolling stays off until you turn it back on in
+  Settings > Bluetooth & devices > Touchpad. If Windows refuses the
+  change, the app logs a warning and the page just scrolls a little
+  while you zoom. Set `BLOCK_TOUCHPAD_SCROLL_WITH_ALT = False` to never
+  touch the setting.
 - Older non-Precision touchpads that send ordinary wheel events work
   like a mouse wheel.
 
@@ -58,7 +66,7 @@ Adjustable constants near the top of `zoom_app.py`:
 | `SCROLL_ZOOM_INVERT` | `False` | Flip the Alt+scroll / swipe direction |
 | `CENTER_ON_CURSOR` | `False` | `True` keeps the cursor centred on screen instead of anchoring zoom to it (the original behaviour) |
 | `PAN_SMOOTHING` | `18.0` | Pan easing, only used when `CENTER_ON_CURSOR = True` |
-
+| `BLOCK_TOUCHPAD_SCROLL_WITH_ALT` | `True` | `False` leaves touchpad scrolling on while Alt is held |
 
 ## Running from source
 
@@ -77,7 +85,7 @@ python -m PyInstaller --onedir --noupx --noconsole --name FullscreenZoom --icon 
 This produces `dist/FullscreenZoom/FullscreenZoom.exe` — a windowed
 (no console) app in a folder alongside its dependencies. It does
 **not** require administrator privileges — the keyboard and mouse
-hooks, touchpad Raw Input and the
+hooks, touchpad Raw Input, the touchpad scroll setting and the
 Magnification API all work as a standard user. The one limitation: if
 a window running *with* elevated privileges (an elevated installer,
 Task Manager, etc.) has focus or is under the cursor, a non-elevated

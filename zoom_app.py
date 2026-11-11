@@ -16,7 +16,7 @@ Alt + scroll (mouse wheel, or two-finger scroll on a touchpad), macOS-style:
     Scroll down   Zoom out — turns zoom OFF once you reach 1x
     Without Alt held, scrolling works normally.
     Zoom is anchored: whatever is under the cursor stays put while zooming.
-    (On a Precision Touchpad the page also scrolls a little while zooming.)
+    (Touchpad scrolling is paused while Alt is held, so Alt+swipe only zooms.)
 
 Direction is detected by polling key state every frame rather than
 reacting to individual key-press events, which is more reliable for
@@ -32,6 +32,7 @@ Requires (see requirements.txt):
 Build into a standalone .exe with build.bat (uses PyInstaller).
 """
 
+import atexit
 import ctypes
 from ctypes import wintypes
 import math
@@ -62,6 +63,13 @@ PAN_SMOOTHING = 18.0       # higher = snappier pan easing (only used when CENTER
 #   on screen (macOS-style). True: keep the cursor centred on screen
 #   (the original behaviour).
 CENTER_ON_CURSOR = False
+
+# While Alt is held, switch off Windows' two-finger touchpad scrolling so
+# Alt+swipe only zooms instead of also scrolling the page. Switched back
+# on the moment Alt is released (and on quit). Caveat: if the app is
+# killed while Alt is held, scrolling stays off until re-enabled in
+# Settings > Bluetooth & devices > Touchpad.
+BLOCK_TOUCHPAD_SCROLL_WITH_ALT = True
 
 # Alt + scroll (mouse wheel or two-finger touchpad scroll), macOS-style.
 SCROLL_ZOOM_PER_NOTCH = 1.25   # zoom multiplier per wheel notch; touchpads send fractions of a notch
@@ -345,6 +353,8 @@ def alt_repeat_suppressor(event):
         return True
     was_down = state.alt_key_down
     state.alt_key_down = True
+    if not was_down:
+        scroll_blocker.alt_pressed()   # pause touchpad scrolling right now, not on the next poll
     return not (was_down and state.alt_masked)   # False = swallow this auto-repeat
 
 
@@ -796,6 +806,122 @@ def stop_input_thread():
 
 
 # ============================================================
+# Touchpad scroll blocking while Alt is held
+# ============================================================
+#
+# Raw Input can read the touchpad but not stop Windows from also
+# scrolling the page. Windows 11 does let an app change the touchpad's
+# "two-finger scroll" setting at runtime (SPI_SETTOUCHPADPARAMETERS), so
+# it is switched off while Alt is held and straight back on when Alt is
+# released (and on quit). The call doesn't change the saved registry value
+# (PrecisionTouchPad\PanEnabled), but Windows does keep the paused state
+# if this process is killed while Alt is held — scrolling then stays off
+# until it is re-enabled, e.g. in Settings > Bluetooth & devices > Touchpad.
+# (A relaunched app can't tell that state from "the user turned scrolling
+# off", so it leaves it alone.)
+
+SPI_GETTOUCHPADPARAMETERS = 0x00AE
+SPI_SETTOUCHPADPARAMETERS = 0x00AF
+
+
+class TOUCHPAD_PARAMETERS(ctypes.Structure):
+    _fields_ = [
+        ("versionNumber", ctypes.c_uint), ("maxSupportedContacts", ctypes.c_uint),
+        ("legacyTouchpadFeatures", ctypes.c_uint),
+        ("touchpadPresent", ctypes.c_uint, 1), ("legacyTouchpadPresent", ctypes.c_uint, 1),
+        ("externalMousePresent", ctypes.c_uint, 1), ("touchpadEnabled", ctypes.c_uint, 1),
+        ("touchpadActive", ctypes.c_uint, 1), ("feedbackSupported", ctypes.c_uint, 1),
+        ("clickForceSupported", ctypes.c_uint, 1), ("Reserved1", ctypes.c_uint, 25),
+        ("allowActiveWhenMousePresent", ctypes.c_uint, 1), ("feedbackEnabled", ctypes.c_uint, 1),
+        ("tapEnabled", ctypes.c_uint, 1), ("tapAndDragEnabled", ctypes.c_uint, 1),
+        ("twoFingerTapEnabled", ctypes.c_uint, 1), ("rightClickZoneEnabled", ctypes.c_uint, 1),
+        ("mouseAccelSettingHonored", ctypes.c_uint, 1), ("panEnabled", ctypes.c_uint, 1),
+        ("zoomEnabled", ctypes.c_uint, 1), ("scrollDirectionReversed", ctypes.c_uint, 1),
+        ("Reserved2", ctypes.c_uint, 22),
+        ("sensitivityLevel", ctypes.c_uint), ("cursorSpeed", ctypes.c_uint),
+        ("feedbackIntensity", ctypes.c_uint),
+        ("clickForceSensitivity", ctypes.c_uint), ("rightClickZoneWidth", ctypes.c_uint),
+        ("rightClickZoneHeight", ctypes.c_uint),
+    ]
+
+
+# Matches the field list in Microsoft's TOUCHPAD_PARAMETERS documentation.
+assert ctypes.sizeof(TOUCHPAD_PARAMETERS) == 44
+
+
+user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+user32.SystemParametersInfoW.restype = wintypes.BOOL
+
+
+class TouchpadScrollBlocker:
+    def __init__(self):
+        self.enabled = BLOCK_TOUCHPAD_SCROLL_WITH_ALT
+        self.blocked = False        # we switched scrolling off and owe a restore
+        self._alt_handled = False   # already acted on the current Alt press
+        self._hold_until = 0.0      # don't restore before this time (Alt only just went down)
+
+    def _get(self):
+        p = TOUCHPAD_PARAMETERS()
+        p.versionNumber = 1
+        if user32.SystemParametersInfoW(SPI_GETTOUCHPADPARAMETERS, ctypes.sizeof(p), ctypes.byref(p), 0):
+            return p
+        return None
+
+    def _set_pan(self, enabled):
+        p = self._get()
+        if p is None:
+            return False
+        p.panEnabled = 1 if enabled else 0
+        return bool(user32.SystemParametersInfoW(SPI_SETTOUCHPADPARAMETERS, ctypes.sizeof(p), ctypes.byref(p), 0))
+
+    def update(self, alt_is_held):
+        """Call every frame from the render loop."""
+        if not self.enabled:
+            return
+        if alt_is_held and not self._alt_handled:
+            self._alt_handled = True
+            p = self._get()
+            if p is None:
+                safe_print(f"WARNING: couldn't read touchpad settings (GetLastError={ctypes.get_last_error()}); "
+                           "Alt+swipe will also scroll the page.")
+                self.enabled = False
+                return
+            if not p.touchpadPresent:
+                self.enabled = False   # no precision touchpad: nothing to pause
+                return
+            if p.panEnabled:           # leave it alone if you already turned scrolling off
+                if self._set_pan(False):
+                    self.blocked = True
+                else:
+                    safe_print(f"WARNING: couldn't pause touchpad scrolling (GetLastError={ctypes.get_last_error()}); "
+                               "Alt+swipe will also scroll the page.")
+                    self.enabled = False
+        elif not alt_is_held and self._alt_handled:
+            if time.perf_counter() < self._hold_until:
+                return   # the keyboard hook saw Alt go down; GetAsyncKeyState may lag a moment
+            self._alt_handled = False
+            self.restore()
+
+    def alt_pressed(self):
+        """Called from the keyboard hook the instant Alt goes down. The render loop only
+        polls Alt every frame (sleep granularity on Windows can make that 15 ms or more), and a
+        swipe that starts in that gap would still scroll the page."""
+        self._hold_until = time.perf_counter() + 0.15
+        self.update(True)
+
+    def restore(self):
+        if self.blocked:
+            if self._set_pan(True):
+                self.blocked = False
+            else:
+                safe_print("WARNING: couldn't switch touchpad scrolling back on — turn it on in "
+                           "Settings > Bluetooth & devices > Touchpad.")
+
+
+scroll_blocker = TouchpadScrollBlocker()
+
+
+# ============================================================
 # Main render loop (runs on a background thread)
 # ============================================================
 
@@ -833,6 +959,7 @@ def zoom_loop():
             time.sleep(sleep_time)
 
         alt_is_held = alt_held()
+        scroll_blocker.update(alt_is_held)
 
         # Safety net for alt_down_suppressor: if a release event was ever
         # missed, don't leave the Down key swallowed forever.
@@ -938,6 +1065,7 @@ def zoom_loop():
             safe_print(f"WARNING: MagSetFullscreenTransform returned failure (0). GetLastError={err}")
             state._logged_mag_failure = True
 
+    scroll_blocker.restore()
     mag.MagUninitialize()
 
 
@@ -997,7 +1125,12 @@ def main():
     input_thread = threading.Thread(target=input_loop, daemon=True)
     input_thread.start()
 
+    # Ctrl+Alt+Q is pressed *with Alt held*, so touchpad scrolling may be
+    # paused at the moment we quit — always switch it back on on the way out.
+    atexit.register(scroll_blocker.restore)
+
     tray.run()  # blocks on the main thread until state.quit() calls tray.stop()
+    scroll_blocker.restore()
 
 
 if __name__ == "__main__":
