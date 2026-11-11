@@ -11,11 +11,12 @@ Hold (plain Alt only — with Ctrl/Shift/Win also held, keys pass through):
     Alt + Up      Zoom in — also turns zoom ON if it was off
     Alt + Down    Zoom out — turns zoom OFF at 1x; passes through when off
 
-Alt + scroll (mouse wheel), macOS-style:
+Alt + scroll (mouse wheel, or two-finger scroll on a touchpad), macOS-style:
     Scroll up     Zoom in — also turns zoom ON if it was off
     Scroll down   Zoom out — turns zoom OFF once you reach 1x
     Without Alt held, scrolling works normally.
     Zoom is anchored: whatever is under the cursor stays put while zooming.
+    (On a Precision Touchpad the page also scrolls a little while zooming.)
 
 Direction is detected by polling key state every frame rather than
 reacting to individual key-press events, which is more reliable for
@@ -62,9 +63,10 @@ PAN_SMOOTHING = 18.0       # higher = snappier pan easing (only used when CENTER
 #   (the original behaviour).
 CENTER_ON_CURSOR = False
 
-# Alt + scroll (mouse wheel), macOS-style.
-SCROLL_ZOOM_PER_NOTCH = 1.25   # zoom multiplier per wheel notch
+# Alt + scroll (mouse wheel or two-finger touchpad scroll), macOS-style.
+SCROLL_ZOOM_PER_NOTCH = 1.25   # zoom multiplier per wheel notch; touchpads send fractions of a notch
 SCROLL_ZOOM_INVERT = False     # set True if Alt+scroll zooms the opposite way you expect
+TOUCHPAD_NOTCHES_PER_HEIGHT = 6.0  # a two-finger swipe the full touchpad height = this many wheel notches
 
 APP_NAME = "FullscreenZoom"
 
@@ -219,8 +221,8 @@ class ZoomState:
 
     def handle_scroll_zoom(self, notches):
         """Apply an Alt+scroll amount, in mouse-wheel notches (positive =
-        zoom in; may be fractional). Called from the mouse hook thread, so it
-        must stay fast. Returns True if the scroll
+        zoom in; may be fractional). Called from the input thread (mouse
+        hook / touchpad), so it must stay fast. Returns True if the scroll
         was used for zooming (and should be blocked from reaching the app)."""
         if SCROLL_ZOOM_INVERT:
             notches = -notches
@@ -365,7 +367,8 @@ def register_hotkeys():
 # Windows Precision Touchpad swipes reach this hook only some of the time:
 # on a Surface they arrive as ordinary wheel events while the fullscreen
 # magnifier is active, but not with zoom off (observed; cause unknown).
-# So a swipe can zoom in/out once zoom is on, but can't start it from 1x.
+# So a swipe can zoom in/out once zoom is on, but can't start it from 1x
+# — see the Raw Input section for that.
 #
 # The hook runs on its own thread with a message loop (required for
 # WH_MOUSE_LL). The callback must return quickly — Windows silently
@@ -439,7 +442,324 @@ def _mouse_hook_proc(n_code, w_param, l_param):
 
 
 # ============================================================
-# Input thread: owns the mouse hook
+# Alt + two-finger scroll on a Precision Touchpad (Raw Input)
+# ============================================================
+#
+# Precision Touchpad swipes don't reliably reach the low-level mouse hook
+# above (on a Surface they only arrive while zoom is already on), so the
+# hook can't start zoom from 1x. The touchpad is therefore read directly
+# as well: Windows' Raw Input API delivers its HID reports
+# (each finger's position + whether it's touching) to a hidden window,
+# and two fingers moving up/down while Alt is held becomes zoom.
+#
+# Limitation: Raw Input can only *read* the touchpad, not block it, so
+# the window under the cursor also scrolls a little while zooming.
+
+hid = ctypes.WinDLL("hid")
+
+HIDP_STATUS_SUCCESS = 0x00110000
+HidP_Input = 0
+HID_PAGE_GENERIC = 0x01
+HID_PAGE_DIGITIZER = 0x0D
+HID_USAGE_Y = 0x31
+HID_USAGE_TOUCH_PAD = 0x05
+HID_USAGE_TIP_SWITCH = 0x42
+HID_USAGE_CONTACT_ID = 0x51
+HID_USAGE_CONTACT_COUNT = 0x54
+
+WM_INPUT = 0x00FF
+RID_INPUT = 0x10000003
+RIM_TYPEHID = 2
+RIDEV_INPUTSINK = 0x00000100   # receive input even when we're not in the foreground
+RIDI_PREPARSEDDATA = 0x20000005
+HWND_MESSAGE = -3
+
+TOUCHPAD_GESTURE_GAP = 0.1     # seconds without a report = new gesture (don't jump)
+
+
+class HIDP_CAPS(ctypes.Structure):
+    _fields_ = [
+        ("Usage", wintypes.USHORT), ("UsagePage", wintypes.USHORT),
+        ("InputReportByteLength", wintypes.USHORT), ("OutputReportByteLength", wintypes.USHORT),
+        ("FeatureReportByteLength", wintypes.USHORT), ("Reserved", wintypes.USHORT * 17),
+        ("NumberLinkCollectionNodes", wintypes.USHORT),
+        ("NumberInputButtonCaps", wintypes.USHORT), ("NumberInputValueCaps", wintypes.USHORT),
+        ("NumberInputDataIndices", wintypes.USHORT),
+        ("NumberOutputButtonCaps", wintypes.USHORT), ("NumberOutputValueCaps", wintypes.USHORT),
+        ("NumberOutputDataIndices", wintypes.USHORT),
+        ("NumberFeatureButtonCaps", wintypes.USHORT), ("NumberFeatureValueCaps", wintypes.USHORT),
+        ("NumberFeatureDataIndices", wintypes.USHORT),
+    ]
+
+
+class HIDP_VALUE_CAPS(ctypes.Structure):
+    _fields_ = [
+        ("UsagePage", wintypes.USHORT), ("ReportID", ctypes.c_ubyte), ("IsAlias", ctypes.c_ubyte),
+        ("BitField", wintypes.USHORT), ("LinkCollection", wintypes.USHORT),
+        ("LinkUsage", wintypes.USHORT), ("LinkUsagePage", wintypes.USHORT),
+        ("IsRange", ctypes.c_ubyte), ("IsStringRange", ctypes.c_ubyte),
+        ("IsDesignatorRange", ctypes.c_ubyte), ("IsAbsolute", ctypes.c_ubyte),
+        ("HasNull", ctypes.c_ubyte), ("Reserved", ctypes.c_ubyte),
+        ("BitSize", wintypes.USHORT), ("ReportCount", wintypes.USHORT),
+        ("Reserved2", wintypes.USHORT * 5),
+        ("UnitsExp", wintypes.ULONG), ("Units", wintypes.ULONG),
+        ("LogicalMin", wintypes.LONG), ("LogicalMax", wintypes.LONG),
+        ("PhysicalMin", wintypes.LONG), ("PhysicalMax", wintypes.LONG),
+        # union { Range {UsageMin, UsageMax, ...}; NotRange {Usage, ...} }
+        ("UsageMin", wintypes.USHORT), ("UsageMax", wintypes.USHORT),
+        ("_union_rest", wintypes.USHORT * 6),
+    ]
+
+
+class RAWINPUTHEADER(ctypes.Structure):
+    _fields_ = [("dwType", wintypes.DWORD), ("dwSize", wintypes.DWORD),
+                ("hDevice", wintypes.HANDLE), ("wParam", wintypes.WPARAM)]
+
+
+class RAWHID(ctypes.Structure):
+    _fields_ = [("dwSizeHid", wintypes.DWORD), ("dwCount", wintypes.DWORD)]
+
+
+class RAWINPUTDEVICE(ctypes.Structure):
+    _fields_ = [("usUsagePage", wintypes.USHORT), ("usUsage", wintypes.USHORT),
+                ("dwFlags", wintypes.DWORD), ("hwndTarget", wintypes.HWND)]
+
+
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+
+class WNDCLASSEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.UINT), ("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
+        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON), ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HANDLE), ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR), ("hIconSm", wintypes.HICON),
+    ]
+
+
+hid.HidP_GetCaps.argtypes = [ctypes.c_void_p, ctypes.POINTER(HIDP_CAPS)]
+hid.HidP_GetCaps.restype = ctypes.c_long
+hid.HidP_GetValueCaps.argtypes = [ctypes.c_int, ctypes.POINTER(HIDP_VALUE_CAPS),
+                                  ctypes.POINTER(wintypes.USHORT), ctypes.c_void_p]
+hid.HidP_GetValueCaps.restype = ctypes.c_long
+hid.HidP_GetUsageValue.argtypes = [ctypes.c_int, wintypes.USHORT, wintypes.USHORT, wintypes.USHORT,
+                                   ctypes.POINTER(wintypes.ULONG), ctypes.c_void_p,
+                                   ctypes.c_void_p, wintypes.ULONG]
+hid.HidP_GetUsageValue.restype = ctypes.c_long
+hid.HidP_GetUsages.argtypes = [ctypes.c_int, wintypes.USHORT, wintypes.USHORT,
+                               ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.ULONG),
+                               ctypes.c_void_p, ctypes.c_void_p, wintypes.ULONG]
+hid.HidP_GetUsages.restype = ctypes.c_long
+hid.HidP_MaxUsageListLength.argtypes = [ctypes.c_int, wintypes.USHORT, ctypes.c_void_p]
+hid.HidP_MaxUsageListLength.restype = wintypes.ULONG
+
+user32.GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p,
+                                   ctypes.POINTER(wintypes.UINT), wintypes.UINT]
+user32.GetRawInputData.restype = wintypes.UINT
+user32.GetRawInputDeviceInfoW.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p,
+                                          ctypes.POINTER(wintypes.UINT)]
+user32.GetRawInputDeviceInfoW.restype = wintypes.UINT
+user32.RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE), wintypes.UINT, wintypes.UINT]
+user32.RegisterRawInputDevices.restype = wintypes.BOOL
+user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+user32.RegisterClassExW.restype = wintypes.ATOM
+user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = LRESULT
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.DispatchMessageW.restype = LRESULT
+
+
+class Touchpad:
+    """One Precision Touchpad: decodes its HID reports into finger
+    positions and turns Alt + two-finger vertical movement into zoom."""
+
+    def __init__(self, h_device):
+        size = wintypes.UINT(0)
+        user32.GetRawInputDeviceInfoW(h_device, RIDI_PREPARSEDDATA, None, ctypes.byref(size))
+        self._pp_buf = ctypes.create_string_buffer(size.value)
+        got = user32.GetRawInputDeviceInfoW(h_device, RIDI_PREPARSEDDATA, self._pp_buf, ctypes.byref(size))
+        if size.value == 0 or got in (0, 0xFFFFFFFF):
+            raise OSError("no preparsed data")
+        self.pp = ctypes.cast(self._pp_buf, ctypes.c_void_p)
+
+        caps = HIDP_CAPS()
+        if hid.HidP_GetCaps(self.pp, ctypes.byref(caps)) != HIDP_STATUS_SUCCESS:
+            raise OSError("HidP_GetCaps failed")
+        n = wintypes.USHORT(caps.NumberInputValueCaps)
+        vcaps = (HIDP_VALUE_CAPS * max(1, n.value))()
+        if hid.HidP_GetValueCaps(HidP_Input, vcaps, ctypes.byref(n), self.pp) != HIDP_STATUS_SUCCESS:
+            raise OSError("HidP_GetValueCaps failed")
+
+        # Each finger slot is its own HID "link collection" holding a Y
+        # value; contact count usually sits in the top-level collection.
+        self.contact_count_lc = None
+        y_caps = {}
+        for c in vcaps[:n.value]:
+            hi = c.UsageMax if c.IsRange else c.UsageMin
+            def has(usage, c=c, hi=hi):
+                return c.UsageMin <= usage <= hi
+            if c.UsagePage == HID_PAGE_DIGITIZER and has(HID_USAGE_CONTACT_COUNT):
+                self.contact_count_lc = c.LinkCollection
+            elif c.UsagePage == HID_PAGE_GENERIC and has(HID_USAGE_Y):
+                y_caps.setdefault(c.LinkCollection, c)
+        if not y_caps or self.contact_count_lc is None:
+            raise OSError("not a usable precision touchpad")
+
+        self.finger_lcs = sorted(y_caps)
+        first = y_caps[self.finger_lcs[0]]
+        self.y_range = max(1, first.LogicalMax - first.LogicalMin)
+        self.max_usages = max(1, hid.HidP_MaxUsageListLength(HidP_Input, HID_PAGE_DIGITIZER, self.pp))
+        self._usages = (wintypes.USHORT * self.max_usages)()
+
+        self._expected = 0      # contacts in the frame being assembled
+        self._frame = {}        # contact id -> (y, touching)
+        self._prev = {}         # contact id -> y, last frame with exactly 2 fingers down
+        self._last_time = 0.0
+
+    def _value(self, page, lc, usage, report, length):
+        v = wintypes.ULONG(0)
+        st = hid.HidP_GetUsageValue(HidP_Input, page, lc, usage, ctypes.byref(v), self.pp, report, length)
+        return v.value if st == HIDP_STATUS_SUCCESS else None
+
+    def _touching(self, lc, report, length):
+        count = wintypes.ULONG(self.max_usages)
+        st = hid.HidP_GetUsages(HidP_Input, HID_PAGE_DIGITIZER, lc, self._usages,
+                                ctypes.byref(count), self.pp, report, length)
+        return st == HIDP_STATUS_SUCCESS and HID_USAGE_TIP_SWITCH in self._usages[:count.value]
+
+    def handle_report(self, data):
+        # A "frame" is every finger at one instant. Touchpads send it either
+        # in one report (all slots filled) or spread over several ("hybrid
+        # mode"), where only the first report carries the contact count.
+        length = len(data)
+        report = ctypes.create_string_buffer(data, length)
+        count = self._value(HID_PAGE_DIGITIZER, self.contact_count_lc, HID_USAGE_CONTACT_COUNT, report, length)
+        if count:
+            self._expected = count
+            self._frame = {}
+        if not self._expected:
+            return
+
+        for lc in self.finger_lcs:
+            if len(self._frame) >= self._expected:
+                break
+            y = self._value(HID_PAGE_GENERIC, lc, HID_USAGE_Y, report, length)
+            if y is None:
+                continue
+            cid = self._value(HID_PAGE_DIGITIZER, lc, HID_USAGE_CONTACT_ID, report, length)
+            self._frame[lc if cid is None else cid] = (y, self._touching(lc, report, length))
+
+        if len(self._frame) >= self._expected:
+            frame, self._expected = self._frame, 0
+            self._handle_frame(frame)
+
+    def _handle_frame(self, frame):
+        down = {cid: y for cid, (y, touching) in frame.items() if touching}
+        now = time.perf_counter()
+        new_gesture = now - self._last_time > TOUCHPAD_GESTURE_GAP
+        self._last_time = now
+
+        prev = self._prev
+        self._prev = down if len(down) == 2 else {}
+        if len(down) != 2 or new_gesture or not alt_held():
+            return
+        if set(down) != set(prev):
+            return  # different fingers than last frame — wait for the next one
+
+        dy = sum(down[c] - prev[c] for c in down) / 2.0
+        if dy:
+            # HID Y grows downward: fingers moving up (dy < 0) = zoom in.
+            state.handle_scroll_zoom(-dy / self.y_range * TOUCHPAD_NOTCHES_PER_HEIGHT)
+
+
+_touchpads = {}   # raw input device handle -> Touchpad, or None if unusable
+
+
+def _touchpad_for(h_device):
+    key = h_device or 0
+    if key not in _touchpads:
+        try:
+            _touchpads[key] = Touchpad(h_device)
+        except Exception as e:
+            safe_print(f"WARNING: ignoring touchpad device: {e}")
+            _touchpads[key] = None
+    return _touchpads[key]
+
+
+_RAW_HEADER_SIZE = ctypes.sizeof(RAWINPUTHEADER)
+
+
+def _handle_raw_input(h_raw_input):
+    size = wintypes.UINT(0)
+    user32.GetRawInputData(h_raw_input, RID_INPUT, None, ctypes.byref(size), _RAW_HEADER_SIZE)
+    if not size.value:
+        return
+    buf = ctypes.create_string_buffer(size.value)
+    if user32.GetRawInputData(h_raw_input, RID_INPUT, buf, ctypes.byref(size), _RAW_HEADER_SIZE) != size.value:
+        return
+
+    header = RAWINPUTHEADER.from_buffer(buf)
+    if header.dwType != RIM_TYPEHID:
+        return
+    pad = _touchpad_for(header.hDevice)
+    if pad is None:
+        return
+
+    hid_info = RAWHID.from_buffer(buf, _RAW_HEADER_SIZE)
+    raw = buf.raw
+    start = _RAW_HEADER_SIZE + ctypes.sizeof(RAWHID)
+    for i in range(hid_info.dwCount):
+        offset = start + i * hid_info.dwSizeHid
+        pad.handle_report(raw[offset:offset + hid_info.dwSizeHid])
+
+
+@WNDPROC
+def _raw_input_wndproc(hwnd, msg, w_param, l_param):
+    if msg == WM_INPUT:
+        try:
+            _handle_raw_input(l_param)
+        except Exception:
+            pass  # a bad report must never take down the input thread
+    return user32.DefWindowProcW(hwnd, msg, w_param, l_param)
+
+
+_raw_input_class = None   # kept alive for the lifetime of the window
+
+
+def create_touchpad_listener():
+    global _raw_input_class
+    h_instance = kernel32.GetModuleHandleW(None)
+    wc = WNDCLASSEXW()
+    wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+    wc.lpfnWndProc = _raw_input_wndproc
+    wc.hInstance = h_instance
+    wc.lpszClassName = f"{APP_NAME}RawInput"
+    if not user32.RegisterClassExW(ctypes.byref(wc)):
+        safe_print(f"WARNING: touchpad listener class failed (GetLastError={ctypes.get_last_error()})")
+        return False
+    _raw_input_class = wc
+
+    hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "", 0, 0, 0, 0, 0,
+                                  wintypes.HWND(HWND_MESSAGE), None, h_instance, None)
+    if not hwnd:
+        safe_print(f"WARNING: touchpad listener window failed (GetLastError={ctypes.get_last_error()})")
+        return False
+
+    rid = RAWINPUTDEVICE(HID_PAGE_DIGITIZER, HID_USAGE_TOUCH_PAD, RIDEV_INPUTSINK, hwnd)
+    if not user32.RegisterRawInputDevices(ctypes.byref(rid), 1, ctypes.sizeof(rid)):
+        safe_print(f"WARNING: touchpad registration failed (GetLastError={ctypes.get_last_error()})")
+        return False
+    return True
+
+
+# ============================================================
+# Input thread: owns the mouse hook and the touchpad listener
 # ============================================================
 
 _input_thread_id = None
@@ -453,13 +773,21 @@ def input_loop():
     if not hook:
         err = ctypes.get_last_error()
         safe_print(f"WARNING: mouse hook failed (GetLastError={err}); Alt+mouse-wheel zoom disabled.")
+
+    touchpad_ok = create_touchpad_listener()
+
+    if not hook and not touchpad_ok:
         return
 
+    # Hook callbacks run inside GetMessageW; WM_INPUT is dispatched to
+    # the hidden touchpad window's procedure.
     msg = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-        pass  # low-level hook callbacks are delivered inside GetMessageW
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
 
-    user32.UnhookWindowsHookEx(hook)
+    if hook:
+        user32.UnhookWindowsHookEx(hook)
 
 
 def stop_input_thread():

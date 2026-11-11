@@ -2,7 +2,7 @@
 
 A lightweight Windows fullscreen magnifier that lives in the system tray.
 Smoothly zooms around your cursor without a console window, from the
-keyboard or the mouse wheel — similar to
+keyboard, the mouse wheel or a two-finger touchpad swipe — similar to
 macOS's "use scroll gesture with modifier keys to zoom".
 
 ## Controls
@@ -13,8 +13,8 @@ macOS's "use scroll gesture with modifier keys to zoom".
 | `Ctrl+Alt+Q` | Quit the app completely |
 | `Alt + Up` (held) | Zoom in. Turns zoom on automatically if it was off |
 | `Alt + Down` (held) | Zoom out. Turns zoom off once you're back at 1×. When zoom is off, passes through to the focused app as normal |
-| `Alt + scroll up` | Zoom in with the mouse wheel. Turns zoom on automatically if it was off |
-| `Alt + scroll down` | Zoom out with the mouse wheel. Turns zoom off once you're back at 1× |
+| `Alt + scroll up` / `Alt + two fingers up` | Zoom in. Works with a mouse wheel or a Precision Touchpad. Turns zoom on automatically if it was off |
+| `Alt + scroll down` / `Alt + two fingers down` | Zoom out. Turns zoom off once you're back at 1× |
 
 Right-click the tray icon for "Toggle Zoom" / "Quit" if you'd rather not
 use hotkeys. The tray icon turns **green** while zoom is active and
@@ -34,10 +34,14 @@ and releasing Alt after zooming won't open the focused app's menu bar.
 
 - **Mouse wheel**: read with a low-level mouse hook. While Alt is held
   the wheel event is used for zoom and never reaches the app underneath.
-- **Two-finger touchpad swipes**: on a Windows Precision Touchpad, swipes reach
-  the mouse hook only while zoom is already on (observed on a Surface; other
-  touchpads may differ). So Alt + swipe can zoom in and out once zoom is on,
-  but can't start it from 1× — use `Ctrl+Alt+Z` or `Alt + Up` for that.
+- **Precision Touchpad**: Windows doesn't reliably pass touchpad swipes to
+  mouse hooks (on a Surface they only arrive while zoom is already on),
+  so the touchpad's finger positions are read directly
+  (Windows Raw Input) and two fingers moving up/down while Alt is held
+  become zoom. Raw Input can read the touchpad but not block it, so the
+  page under the cursor also scrolls a little while you zoom.
+- Older non-Precision touchpads that send ordinary wheel events work
+  like a mouse wheel.
 
 ## Settings
 
@@ -50,7 +54,8 @@ Adjustable constants near the top of `zoom_app.py`:
 | `ZOOM_SPEED` | `2.5` | Zoom units per second while holding `Alt+Up/Down` |
 | `ZOOM_SMOOTHING` | `8.0` | Higher = snappier zoom easing |
 | `SCROLL_ZOOM_PER_NOTCH` | `1.25` | Zoom multiplier per mouse-wheel notch |
-| `SCROLL_ZOOM_INVERT` | `False` | Flip the Alt+scroll direction |
+| `TOUCHPAD_NOTCHES_PER_HEIGHT` | `6.0` | Touchpad speed: a swipe the full pad height counts as this many wheel notches (≈4×) |
+| `SCROLL_ZOOM_INVERT` | `False` | Flip the Alt+scroll / swipe direction |
 | `CENTER_ON_CURSOR` | `False` | `True` keeps the cursor centred on screen instead of anchoring zoom to it (the original behaviour) |
 | `PAN_SMOOTHING` | `18.0` | Pan easing, only used when `CENTER_ON_CURSOR = True` |
 
@@ -72,7 +77,7 @@ python -m PyInstaller --onedir --noupx --noconsole --name FullscreenZoom --icon 
 This produces `dist/FullscreenZoom/FullscreenZoom.exe` — a windowed
 (no console) app in a folder alongside its dependencies. It does
 **not** require administrator privileges — the keyboard and mouse
-hooks and the
+hooks, touchpad Raw Input and the
 Magnification API all work as a standard user. The one limitation: if
 a window running *with* elevated privileges (an elevated installer,
 Task Manager, etc.) has focus or is under the cursor, a non-elevated
